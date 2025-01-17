@@ -5,6 +5,9 @@ from PIL import Image
 import io
 from openai import OpenAI
 import os
+from gtts import gTTS
+import tempfile
+import time
 
 # Initialize OpenAI client - get API key from environment variable or Streamlit secrets
 api_key = os.getenv('OPENAI_API_KEY') or st.secrets["OPENAI_API_KEY"]
@@ -16,11 +19,39 @@ def encode_image(image):
     image.save(buffered, format="JPEG")
     return base64.b64encode(buffered.getvalue()).decode("utf-8")
 
+def text_to_speech(text):
+    temp_file = None
+    try:
+        # Create a temporary file to store the audio
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
+        tts = gTTS(text=text, lang='en')
+        tts.save(temp_file.name)
+        
+        # Close the file before playing
+        temp_file.close()
+        
+        # Play the audio
+        st.audio(temp_file.name, format='audio/mp3')
+        
+        # Small delay to ensure file is not in use
+        time.sleep(0.5)
+        
+    except Exception as e:
+        st.error(f"Error generating speech: {str(e)}")
+    finally:
+        # Clean up in finally block
+        if temp_file is not None:
+            try:
+                os.unlink(temp_file.name)
+            except Exception:
+                pass  # Ignore deletion errors
+
 def analyze_image(image):
     base64_image = encode_image(image)
     
     try:
-        response = client.chat.completions.create(
+        # First request for markdown response
+        markdown_response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
                 {
@@ -28,7 +59,22 @@ def analyze_image(image):
                     "content": [
                         {
                             "type": "text",
-                            "text": "Is there a fish in this image? If yes, please identify the specific type of fish and provide a detailed description including its characteristics, habitat, and interesting facts. If no fish is present, simply respond with 'No fish detected in this image.'",
+                            "text": """Analyze this image for fish. Format your response in markdown as follows:
+
+If a fish is present:
+# [Fish Species Name > just guess eventhough it is not correct. YOU MUST GUESS]
+## Characteristics
+[List key physical characteristics very short]
+
+## Habitat
+[Describe natural habitat. very short]
+
+## Interesting Facts
+[List 2-3 interesting facts. very short]
+
+If no fish is present:
+# Image Description
+[Describe what you see in the image very short]""",
                         },
                         {
                             "type": "image_url",
@@ -41,11 +87,37 @@ def analyze_image(image):
             ],
             max_tokens=500,
         )
-        return response.choices[0].message.content
+
+        # Second request for speech response
+        speech_response = client.chat.completions.create(
+            model="gpt-4o-mini",  # Changed to gpt-4o-mini
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Give me the name of the fish and brief description. very short",
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{base64_image}"
+                            },
+                        },
+                    ],
+                }
+            ],
+            max_tokens=200,
+        )
+
+        return (
+            markdown_response.choices[0].message.content,
+            speech_response.choices[0].message.content
+        )
     except Exception as e:
         st.error(f"Error analyzing image: {str(e)}")
-        st.error("Please make sure you have access to GPT-4 Vision API in your OpenAI account")
-        return "Error occurred while analyzing the image. Please try again."
+        return "Error occurred while analyzing the image. Please try again.", "An error occurred while analyzing the image."
 
 def main():
     st.title("Fish Species Identifier")
@@ -62,15 +134,16 @@ def main():
         image = Image.open(img_file)
         st.image(image, caption="Uploaded Image", use_column_width=True)
 
-        # Add a button to trigger analysis
-        if st.button("Analyze Image"):
-            with st.spinner("Analyzing image..."):
-                # Get the analysis result
-                result = analyze_image(image)
-                
-                # Display the result
-                st.write("### Analysis Result:")
-                st.write(result)
+        # Automatically analyze when image is captured/uploaded
+        with st.spinner("Analyzing image..."):
+            # Get both markdown and speech versions of the analysis
+            markdown_result, speech_result = analyze_image(image)
+            
+            # Display the markdown result
+            st.markdown(markdown_result)
+            
+            # Automatically play the speech version
+            text_to_speech(speech_result)
 
 if __name__ == "__main__":
     main() 
